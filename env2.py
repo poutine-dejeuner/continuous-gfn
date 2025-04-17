@@ -1,8 +1,6 @@
 import torch
 from torch.distributions import MultivariateNormal
 
-from icecream import ic
-
 
 class Box:
     """D-dimensional box with lower bound 0 and upper bound 1. A maximum step size 0<delta<1 defines
@@ -11,29 +9,25 @@ class Box:
 
     def __init__(
         self,
-        dim=2,
+        state_shape=(101,91),
+        action_dim=4,
         delta=0.1,
         epsilon=1e-4,
-        R0=0.1,
-        R1=0.5,
-        R2=2.0,
         reward_debug=False,
         device_str="cpu",
         verify_actions=False,
     ):
         # Set verify_actions to False to disable action verification for faster step execution.
-        self.dim = dim
+        self.state_shape=state_shape
+        self.action_dim=action_dim
         self.delta = delta
         self.epsilon = epsilon
         self.device_str = device_str
         self.device = torch.device(device_str)
-        self.terminal_action = torch.full((dim,), -float("inf"), device=self.device)
-        self.sink_state = torch.full((dim,), -float("inf"), device=self.device)
+        self.terminal_action = torch.full((self.action_dim,), -float("inf"), device=self.device)
+        self.sink_state = torch.full(self.state_shape, -float("inf"), device=self.device)
         self.verify_actions = verify_actions
 
-        self.R0 = R0
-        self.R1 = R1
-        self.R2 = R2
         self.reward_debug = reward_debug
 
     def is_actions_valid(self, states, actions
@@ -66,10 +60,10 @@ class Box:
         """Return a mask of terminal actions."""
         return torch.all(actions == self.terminal_action, dim=-1)
 
+    def state_action_transition(self, states, actions):
+
     def step(self, states, actions) :
-        ic(states.shape)
-        ic(actions.shape)
-        """Take a step in the environment. The states can include the sink state [-inf, ..., -inf].
+        """The states can include the sink state [-inf, ..., -inf].
         In which case, the corresponding actions are ignored."""
         # First, select the states that are not the sink state.
         non_sink_mask = ~torch.all(states == self.sink_state, dim=-1)
@@ -85,9 +79,13 @@ class Box:
         # Then, take a step and store that in a new tensor.
         new_states = torch.full_like(states, -float("inf"))
         non_sink_new_states = new_states[non_sink_mask]
-        non_sink_new_states[non_terminal_mask] = (
-            non_terminal_states + non_terminal_actions
-        )
+        # Update non sink non terminal states with non sink actions
+        non_sink_new_states[non_terminal_mask] = self.state_action_transition(
+                                                    non_terminal_states, 
+                                                    non_terminal_actions)
+        # non_sink_new_states[non_terminal_mask] = (
+        #     non_terminal_states + non_terminal_actions
+        # )
         new_states[non_sink_mask] = non_sink_new_states
         # Finally, return the new states.
         return new_states
