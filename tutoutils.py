@@ -54,60 +54,72 @@ def plot_samples_and_histogram(samples, scores, N):
     plt.savefig('histogram.png')
     plt.close()
 
-def rbf(parameters, image_shape):
-    """
-        takes a parameters tensor of shape (N, 6), in dim 1, the first 2
-        components are the center of the gaussian, the next 3 are the
+def rbf(parameters, image_shape=(101,91)):                                              
+    """                                                                        
+        takes a parameters tensor of shape (M, N, 6), in dim -1, the first 2       
+        components are the center of the gaussian, the next 3 are the          
         components of the covariance matrix, and the last one is the amplitude.
-        it computes the gaussian function for each of the N samples at every
-        points of a grid of shape image_shape.
+        it computes the gaussian function for each of the N samples at every   
+        points of a grid of shape image_shape.                                 
+        input:
+        parameters: torch.Tensor of shape (..., N, 6)                               
+        image_shape: tuple (height, width)                                     
 
-        parameters: torch.Tensor of shape (N, 6)
-        image_shape: tuple (height, width)
+        returns:
+        image: torch.Tensor (..., height, width)
+
     """
-    dtype = parameters.dtype
-    device = parameters.device
+    dtype = torch.float
+    paramtype = type(parameters)
+    device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
+    parameters = torch.tensor(parameters, dtype=dtype)
+
     # Unpack parameters
-    centers = parameters[:, :2]
-    covariances = parameters[:, 2:5]
-    amplitudes = parameters[:, 5]
+    centers = parameters[..., :, :2]
+    centerscopy = centers.clone()
+    centers[...,0] = centers[...,0]/image_shape[0]
+    centers[...,1] = centers[...,1]/image_shape[1]
+    covariances = parameters[..., :, 2:5]
+    amplitudes = parameters[..., :, 5]
     # covariance_mat is an array of shape (N, 2, 2)
-    covariance_mat = torch.zeros((len(parameters), 2, 2), device=device)
-    covariance_mat[:, 0, 0] = covariances[:, 0]
-    covariance_mat[:, 1, 1] = covariances[:, 1]
-    covariance_mat[:, 0, 1] = covariances[:, 2]
-    covariance_mat[:, 1, 0] = covariances[:, 2]
+    covariance_mat = torch.zeros(parameters.shape[:-1] +  (2, 2))
+    covariance_mat[..., 0, 0] = covariances[..., 0]
+    covariance_mat[..., 1, 1] = covariances[..., 1]
+    covariance_mat[..., 0, 1] = covariances[..., 2]
+    covariance_mat[..., 1, 0] = covariances[..., 2]
 
     # Create a grid of points
     x = np.linspace(0, 1, image_shape[0])
     y = np.linspace(0, 1, image_shape[1])
+
     X, Y = np.meshgrid(x, y)
     grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
-    num_gridpoints = grid_points.shape[0]
-    grid_points = np.expand_dims(grid_points, axis=0)
-    grid_points = np.repeat(grid_points, len(parameters), axis=0)
-    grid_points = torch.tensor(grid_points, dtype=dtype, device=device)
+    n_gridpoints = grid_points.shape[0]
+    # grid_points = np.expand_dims(grid_points, axis=0)
+    # grid_points = np.repeat(grid_points, len(parameters), axis=0)
+    grid_points = torch.tensor(grid_points, dtype=dtype)
+    
     # grid_points is an array of shape (N, height * width, 2)
     # Compute the difference from the centers
-    centers = centers.unsqueeze(1)
-    centers = centers.repeat(1, num_gridpoints, 1)
+    # centers = centers.unsqueeze(1)
+    # centers = centers.repeat(1, num_gridpoints, 1)
+    centers = centers.unsqueeze(-2)
+    centers = torch.repeat_interleave(centers, repeats=n_gridpoints, dim=-2)
     diff = grid_points - centers
+    z = torch.einsum('...ij,...jk,...ik->...i', diff, covariance_mat, diff)
+    # det = torch.linalg.det(covariance_mat).unsqueeze(-1).expand_as(z)
+    # z = z/(2*torch.pi*torch.sqrt(det))
 
-    # compute the RBF into an array of shape (N, height, width)
-    # using the covariance matrix
-    # z = (x - mu)^T * cov^-1 * (x - mu)
-    # z = ( diff @ covariance_mat ) @ diff.transpose(1, 2)
-    # z = torch.diagonal(z, dim1=-2, dim2=-1)
-    # l'operation du dessus est ce qu'on veut faire mais ca explose la
-    # memoire donc faut un truc plus malin
-    z = torch.einsum('bij,bjk,bik->bi', diff, covariance_mat, diff)
-    
     # take the diagonal in dims -2, -1
-
     z = torch.exp(-0.5 * z)
-    z = z.reshape(len(parameters), image_shape[0], image_shape[1])
     # multiply by the amplitude
-    z = z * amplitudes.unsqueeze(1).unsqueeze(2)
+    amplitudes = amplitudes.unsqueeze(-1).expand_as(z)
+    z = z * amplitudes
+    z = z.sum(-2)
+    z = z.reshape(z.shape[:-1] + (image_shape[1], image_shape[0]))
+    z = torch.transpose(z, -1, -2)
+    if paramtype is np.ndarray:
+        z = z.numpy()
     return z
 
 

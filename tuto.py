@@ -79,8 +79,8 @@ def get_policy_dist(model, x):
 
     return policy_dist
 
-def action_parameters_to_state_space(action):
-    action_image = rbf(action, env.state_shape)
+def action_parameters_to_state_space(action, state_shape=(101, 91)):
+    action_image = rbf(action, state_shape)
     return action_image
 
 def step(x, action):
@@ -231,27 +231,28 @@ def plot_samples_and_histogram(samples, scores,N):
     plt.close()
 
 
-debug = True
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-dtype = torch.float32
+if __name__ == "__main__":
+    debug = True
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dtype = torch.float32
 
-trajectory_length = 20
-min_policy_std = 0.1
-max_policy_std = 1.0
-batch_size = 64
-action_dim = 6
-scatter_config={"scattering_scale":2, "scattering_angles":8,
-        "scattering_max_order":2, "mlp_dim":1024, "num_layers":1,
-                "output_dim":action_dim*2, "device":device, "dtype":dtype}
-n_iterations = 5000
-reward_fn = get_cpx_fields_unet_cnn_fompred()
-env = PhotoEnv()
-forward_model, backward_model, logZ = train(batch_size, trajectory_length, env, device, n_iterations)
+    trajectory_length = 20
+    min_policy_std = 0.1
+    max_policy_std = 1.0
+    batch_size = 64
+    action_dim = 6
+    scatter_config={"scattering_scale":2, "scattering_angles":8,
+            "scattering_max_order":2, "mlp_dim":1024, "num_layers":1,
+                    "output_dim":action_dim*2, "device":device, "dtype":dtype}
+    n_iterations = 5000
+    reward_fn = get_cpx_fields_unet_cnn_fompred()
+    env = PhotoEnv()
+    forward_model, backward_model, logZ = train(batch_size, trajectory_length, env, device, n_iterations)
 
-samples = inference(trajectory_length, forward_model, env)
-samples = samples.cpu().numpy()
-if debug:
-    fom = torch.rand(samples.shape[0])
-else:
-    fom = compute_FOM_parallele(samples)
-plot_samples_and_histogram(samples, fom, 10)
+    samples = inference(trajectory_length, forward_model, env)
+    samples = samples.cpu().numpy()
+    if debug:
+        fom = torch.rand(samples.shape[0])
+    else:
+        fom = compute_FOM_parallele(samples)
+    plot_samples_and_histogram(samples, fom, 10)
