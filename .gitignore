@@ -1,3 +1,5 @@
+slurm/
+*.png
 wandb/*
 kolya-gmm/*
 .DS_Store
