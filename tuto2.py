@@ -3,11 +3,18 @@ import os
 import sys
 import argparse
 import yaml
-import torch
-import numpy as np
 from tqdm import trange
+from memory_profiler import profile
 
-from tutoutils import rbf, plot_samples_and_histogram, save_code
+import numpy as np
+import torch
+# from torch.profiler import(record_function,
+                           # ProfilerActivity,
+                           # profile,
+                           # )
+
+from tutoutils import (rbf, plot_samples_and_histogram, save_code,
+                            CustomResNet152, tonumpy, stats)
 from nanophoto.models import ScatteringNetwork
 from nanophoto.meep_compute_fom import compute_FOM_parallele
 from nanophoto.get_trained_models import get_cpx_fields_unet_cnn_fompred
@@ -58,12 +65,13 @@ class PhotoEnv():
 
     def reward(self, x):
         x = torch.nn.functional.sigmoid(x)
+        ic(x.mean())
         return self.reward_fun(x)
 
     def log_reward(self, x):
         # logre = torch.logsumexp(torch.stack([m.log_prob(x) for m in self.mixture], 0), 0)
         # x = (x.to(self.device) > 1/2).to(self.dtype)
-        logre = torch.log(self.reward_fun(x))
+        logre = torch.log(self.reward(x))
         return logre
 
 
@@ -72,6 +80,7 @@ def get_policy_dist(env, model, x, min_policy_std, max_policy_std):
     A policy is a distribution we predict the parameters of using a neural
     network, which we then sample from.
     """
+    x = x.unsqueeze(1)
     x = x.contiguous()
     pf_params = model(x)  # Shape = [batch_shape, env.action_dim]
     policy_mean = pf_params[:, 0: env.action_dim]
@@ -115,10 +124,8 @@ def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1):
     # Input = [x_position, n_steps], Output = [mus, standard_deviations].
     dtype = torch.float
     device = torch.device('cuda')
-    forward_model = ScatteringNetwork(**scatter_config, dtype=dtype,
-                                      device=device)
-    backward_model = ScatteringNetwork(**scatter_config, dtype=dtype,
-                                       device=device)
+    forward_model = CustomResNet152(out_features=12).to(device)
+    backward_model = CustomResNet152(out_features=12).to(device)
 
     logZ = torch.nn.Parameter(torch.tensor(0.0, device=device))
 
@@ -133,16 +140,17 @@ def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1):
     return (forward_model, backward_model, logZ, optimizer)
 
 
-def train(batch_size, trajectory_length, env, device, n_iterations, min_policy_std, max_policy_std):
+def train(batch_size, trajectory_length, env, device, n_iterations,
+        min_policy_std, max_policy_std, savepath):
     """Continuous GFlowNet training loop, with the Trajectory Balance objective."""
     # seed_all(seed)
     # Default hyperparameters used.
     forward_model, backward_model, logZ, optimizer = setup_experiment()
     losses = []
     tbar = trange(n_iterations)
+    avg_log_reward = 0
 
     for it in tbar:
-        ic(torch.cuda.memory_allocated()/1e9, 'giga')
         optimizer.zero_grad()
 
         x = initalize_state(batch_size, device, env)
@@ -173,6 +181,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations, min_policy_s
             logPB += policy_dist.log_prob(action)
 
         log_reward = env.log_reward(x)
+        avg_log_reward = log_reward.mean()
 
         # Compute Trajectory Balance Loss.
         loss = (logZ + logPF - logPB - log_reward).pow(2).mean()
@@ -181,11 +190,11 @@ def train(batch_size, trajectory_length, env, device, n_iterations, min_policy_s
         losses.append(loss.item())
 
         if it % 100 == 0:
-            tbar.set_description("Training iter {}: (loss={:.3f}, estimated logZ={:.3f}, LR={}".format(
+            tbar.set_description("Training iter {}: (loss={:.3f}, logZ={:.3f}, log reward={:.3f}".format(
                 it,
                 np.array(losses[-100:]).mean(),
                 logZ.item(),
-                optimizer.param_groups[0]['lr'],
+                avg_log_reward,
             )
             )
             os.makedirs('checkpoints/', exist_ok=True)
@@ -193,6 +202,9 @@ def train(batch_size, trajectory_length, env, device, n_iterations, min_policy_s
             torch.save(backward_model.state_dict(),
                        'checkpoints/backwardm.pth')
             torch.save(logZ, 'checkpoints/logz.pth')
+            log_reward = tonumpy(log_reward.squeeze())
+            x = tonumpy(torch.nn.functional.sigmoid(x))
+            plot_samples_and_histogram(x, log_reward, 10, savepath)
 
     return (forward_model, backward_model, logZ)
 
@@ -208,12 +220,8 @@ def inference(trajectory_length, forward_model, env, batch_size, min_policy_std,
         for t in range(trajectory_length):
             policy_dist = get_policy_dist(env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
-            ic(action)
-            input()
 
             x = step(x, action)
-            ic(x.min(), x.max(), x.mean())
-            input()
             # trajectory[:, t + 1, :] = new_x
             # x = new_x
 
@@ -221,25 +229,22 @@ def inference(trajectory_length, forward_model, env, batch_size, min_policy_std,
     return x
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-d', action='store_true', default=False)
-    args = parser.parse_args()
-    debug = args.d
-
+# @profile
+def main(debug=True):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float32
 
-    trajectory_length = 20
+    trajectory_length = 8 
     min_policy_std = 0.1
     max_policy_std = 1.0
-    batch_size = 32
+    batch_size = 16
     action_dim = 6
     scatter_config = {"scattering_scale": 2, "scattering_angles": 8,
                       "scattering_max_order": 2, "mlp_dim": 1024, "num_layers": 1,
                       "output_dim": action_dim*2}
 
-    savepath = os.path.join('outfiles/', os.environ['SLURM_JOB_ID'])
+    savedir = os.environ['SLURM_JOB_ID'] if debug is False else 'debug'
+    savepath = os.path.join('outfiles', savedir)
     os.makedirs(savepath, exist_ok=True)
     with open(os.path.join(savepath, 'config.yml'), 'w') as f:
         yaml.dump(scatter_config, f)
@@ -248,18 +253,31 @@ if __name__ == "__main__":
     n_iterations = 5000 if debug is False else 2
     reward_fn = get_cpx_fields_unet_cnn_fompred()
     env = PhotoEnv()
+    # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True) as prof:
     forward_model, backward_model, logZ = train(
-        batch_size, trajectory_length, env, device, n_iterations, min_policy_std, max_policy_std)
+    batch_size, trajectory_length, env, device, n_iterations,
+    min_policy_std, max_policy_std, savepath)
+    # with open("cuda_prof.log", "w") as f:
+    #     old_sdtout = sys.stdout
+    #     sys.stdout = f
+    #     print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+    #     sys.stdout = old_sdtout
 
-    num_samples = 16
-    samples = inference(trajectory_length, forward_model, env, num_samples)
+    samples = inference(trajectory_length, forward_model, env, batch_size,
+            min_policy_std, max_policy_std)
     samples = samples.cpu().numpy()
-    ic(samples.shape)
-    ic(samples.min(), samples.max(), samples.mean())
     if debug:
         fom = torch.rand(samples.shape[0])
     else:
         fom = compute_FOM_parallele(samples)
     np.save(os.path.join(savepath, 'samples.npy'), samples)
     np.save(os.path.join(savepath, 'fom.npy'), fom)
-    plot_samples_and_histogram(samples, fom, 10)
+    plot_samples_and_histogram(samples, fom, 10, savepath)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', action='store_true', default=False)
+    args = parser.parse_args()
+    debug = args.d
+
+    main(True)

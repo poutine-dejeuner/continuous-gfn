@@ -1,3 +1,5 @@
+checkpoints/
+outfiles/
 slurm/
 *.png
 wandb/*

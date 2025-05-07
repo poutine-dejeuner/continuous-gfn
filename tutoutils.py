@@ -1,7 +1,27 @@
+import os
+import shutil
 import torch
+import torch.nn as nn
+import torchvision.models as models
 import numpy as np
 import matplotlib.pyplot as plt
 from icecream import ic
+
+class CustomResNet152(nn.Module):
+    def __init__(self, input_channels=1, out_features=12):
+        super().__init__()
+        self.base = models.resnet152()
+        self.base.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.base.fc = nn.Linear(self.base.fc.in_features, out_features)
+
+    def forward(self, x):
+        return self.base(x)
+
+
+def save_code(savepath):
+    if not os.path.exists(os.path.join(savepath, 'code.py')):
+        sourcefile = os.path.basename(__file__)
+        shutil.copy2(sourcefile, os.path.join(savepath, 'code.py'))
 
 def get_vram():
     free = torch.cuda.mem_get_info()[0] / 1024 ** 3
@@ -10,7 +30,9 @@ def get_vram():
     free_cubes = int(total_cubes * free / total)
     return f'VRAM: {total - free:.2f}/{total:.2f}GB\t VRAM:[' + (
             total_cubes - free_cubes) * '▮' + free_cubes * '▯' + ']'
+
 def get_ram():
+    import psutil
     mem = psutil.virtual_memory()
     free = mem.available / 1024 ** 3
     total = mem.total / 1024 ** 3
@@ -18,8 +40,14 @@ def get_ram():
     free_cubes = int(total_cubes * free / total)
     return f'RAM: {total - free:.2f}/{total:.2f}GB\t RAM:[' + (total_cubes - free_cubes) * '▮' + free_cubes * '▯' + ']'
 
+def tonumpy(tensor):
+    return tensor.detach().cpu().numpy()
 
-def plot_samples_and_histogram(samples, scores, N):
+def stats(array):
+    ic(array.min(), array.max(), array.mean())
+
+
+def plot_samples_and_histogram(samples, scores, N, savepath):
     """
         makes a NxN figure of samples with their score values and a
         histogram of the scores. saves the figures to 2 png files.
@@ -33,26 +61,28 @@ def plot_samples_and_histogram(samples, scores, N):
         for j in range(N):
             index = i * N + j
             if index < len(samples):
-                axs[i, j].imshow(samples[index], cmap='gray')
+                axs[i, j].imshow(samples[index])
                 axs[i, j].set_title(f'Score: {scores[index]:.2f}')
                 axs[i, j].axis('off')
             else:
                 axs[i, j].axis('off')
 
     # Save the samples figure
-    plt.savefig('samples.png')
+    plt.tight_layout()
+    plt.savefig(os.path.join(savepath, 'samples.png'))
     plt.close()
 
     # Create a histogram of scores
     plt.figure(figsize=(8, 6))
+    ic(scores)
     plt.hist(scores, bins=30, color='blue', alpha=0.7)
     plt.title('Histogram of Scores')
     plt.xlabel('Score')
     plt.ylabel('Frequency')
 
     # Save the histogram figure
-    plt.savefig('histogram.png')
-    plt.close()
+    plt.savefig(os.path.join(savepath, 'histogram.png'))
+    plt.clf()
 
 def rbf(parameters, image_shape=(101,91)):                                              
     """                                                                        
@@ -71,18 +101,17 @@ def rbf(parameters, image_shape=(101,91)):
     """
     dtype = torch.float
     paramtype = type(parameters)
-    device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
-    parameters = torch.tensor(parameters, dtype=dtype)
+    device = parameters.device
+    parameters = parameters.to(device)
 
     # Unpack parameters
     centers = parameters[..., :, :2]
-    centerscopy = centers.clone()
     centers[...,0] = centers[...,0]/image_shape[0]
     centers[...,1] = centers[...,1]/image_shape[1]
     covariances = parameters[..., :, 2:5]
     amplitudes = parameters[..., :, 5]
     # covariance_mat is an array of shape (N, 2, 2)
-    covariance_mat = torch.zeros(parameters.shape[:-1] +  (2, 2))
+    covariance_mat = torch.zeros(parameters.shape[:-1] +  (2, 2), device=device)
     covariance_mat[..., 0, 0] = covariances[..., 0]
     covariance_mat[..., 1, 1] = covariances[..., 1]
     covariance_mat[..., 0, 1] = covariances[..., 2]
@@ -97,7 +126,7 @@ def rbf(parameters, image_shape=(101,91)):
     n_gridpoints = grid_points.shape[0]
     # grid_points = np.expand_dims(grid_points, axis=0)
     # grid_points = np.repeat(grid_points, len(parameters), axis=0)
-    grid_points = torch.tensor(grid_points, dtype=dtype)
+    grid_points = torch.tensor(grid_points, dtype=dtype, device=device)
     
     # grid_points is an array of shape (N, height * width, 2)
     # Compute the difference from the centers
