@@ -102,6 +102,7 @@ def step(x, action):
     new_x = torch.zeros_like(x)
     action = action_parameters_to_state_space(action).to(x.device)
     new_x = x + action
+    new_x = torch.clip(new_x, min=0, max=1)
 
     return new_x
 
@@ -163,6 +164,8 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
 
         # Forward loop to generate full trajectory and compute logPF.
         for t in range(trajectory_length):
+            stats(x)
+            ic(x.shape)
             policy_dist = get_policy_dist(env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
             logPF += policy_dist.log_prob(action)

@@ -10,7 +10,7 @@ import torch
 # from torch.profiler import profile, record_function, ProfilerActivity
 
 from tutoutils import (rbf, plot_samples_and_histogram, save_code,
-                            CustomResNet152, tonumpy)
+                            CustomResNet152, tonumpy, stats)
 from nanophoto.models import ScatteringNetwork
 from nanophoto.meep_compute_fom import compute_FOM_parallele
 from nanophoto.get_trained_models import get_cpx_fields_unet_cnn_fompred
@@ -186,6 +186,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
 
         # Forward loop to generate full trajectory and compute logPF.
         for t in range(trajectory_length):
+            stats(x)
             policy_dist = get_policy_dist(env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
             action = action.squeeze()
@@ -206,7 +207,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
             logPB = logPB + policy_dist.log_prob(action)
 
         log_reward = env.log_reward(x)
-        avg_log_reward = log_reward.mean()
+        avg_log_reward = torch.mean(log_reward)
 
         # Compute Trajectory Balance Loss.
         loss = (logZ + logPF - logPB - log_reward).pow(2).mean()
