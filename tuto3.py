@@ -9,9 +9,7 @@ import numpy as np
 import torch
 # from torch.profiler import profile, record_function, ProfilerActivity
 
-from tutoutils import (rbf, plot_samples_and_histogram, save_code,
-                            CustomResNet152, tonumpy)
-from nanophoto.models import ScatteringNetwork
+from tutoutils import (rbf, plot_samples_and_histogram, tonumpy, get_vram)
 from nanophoto.meep_compute_fom import compute_FOM_parallele
 from nanophoto.get_trained_models import get_cpx_fields_unet_cnn_fompred
 from set_transfo.models import SetTransformer
@@ -19,8 +17,7 @@ from set_transfo.models import SetTransformer
 from icecream import ic, install
 install()
 
-sys.path.append(
-    '/home/mila/l/letournv/repos/nanophoto/experiments/fom_predictors/')
+sys.path.append(os.path.expanduser( '~/repos/nanophoto/experiments/fom_predictors/'))
 
 
 def log_tensor_mem():
@@ -93,35 +90,6 @@ def get_policy_dist(env, model, x, min_policy_std, max_policy_std):
     return policy_dist
 
 
-def step(state: torch.Tensor, action: torch.Tensor):
-    """
-    Perform a single step in the environment. This is done by adding the
-    action tensor to the state tensor at the smallest dim 1 index zero tensor.
-    input: state: (batch, seq_len, action_dim)
-    action: (batch, action_dim)
-    output: new_state: (batch, seq_len, action_dim)
-    """
-    nonzero_mask = state[0].abs().sum(dim=1) > 0
-    index = nonzero_mask.float().argmin()
-    # get the first index of the first zero tensor
-    new_state = torch.clone(state).detach()
-    new_state[:, index, :] = action
-    return new_state
-
-def test__step():
-    x = torch.zeros(2, 4, 2)
-    z = torch.ones(2, 2, 2)
-    x[:, :2, :] = z
-    y = torch.rand(2, 2)
-    xx = step(x, y)
-
-    maskx = x.abs().sum(dim=2) > 0
-    indx = maskx.float().argmin(dim=1)
-    maskxx = xx.abs().sum(dim=2) > 0
-    indxx = maskxx.float().argmin(dim=1)
-    assert (indxx == indx + 1).all()
-
-
 def initalize_state(batch_size, device, env, randn=False):
     """Trajectory starts at state = (X_0, t=0)."""
     shape = (batch_size,) + env.state_shape
@@ -131,7 +99,7 @@ def initalize_state(batch_size, device, env, randn=False):
     return x
 
 
-def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1):
+def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1, debug=False):
     """Generate the learned parameters and optimizer for an experiment.
 
     Forward and backward models are MLPs with a single hidden layer. logZ is
@@ -143,11 +111,15 @@ def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1):
     device = torch.device('cuda')
     dim_input = env.action_dim
     dim_output = env.action_dim
+    dim_hidden = 128 if debug is False else 8
     # breakpoint()
+    m0 = torch.cuda.memory_allocated()
     forward_model = SetTransformer(dim_input=dim_input, num_outputs=1,
-            dim_output=2*dim_output).to(device)
+            dim_output=2*dim_output, dim_hidden=dim_hidden).to(device)
+    m1 = torch.cuda.memory_allocated()
+    ic((m1 - m0)/1e6, m1/1e6)
     backward_model = SetTransformer(dim_input=dim_input, num_outputs=1,
-            dim_output=2*dim_output).to(device)
+            dim_output=2*dim_output, dim_hidden=dim_hidden).to(device)
     ic("num model params", sum(param.numel() for param in forward_model.parameters()))
 
     logZ = torch.nn.Parameter(torch.tensor(0.0, device=device))
@@ -163,17 +135,34 @@ def setup_experiment(hid_dim=64, lr_model=1e-3, lr_logz=1e-1):
     return (forward_model, backward_model, logZ, optimizer)
 
 
+def step(state: torch.Tensor, action: torch.Tensor):
+    """
+    Perform a single step in the environment. This is done by adding the
+    action tensor to the state tensor at the smallest dim 1 index zero tensor.
+    input: state: (batch, seq_len, action_dim)
+    action: (batch, action_dim)
+    output: new_state: (batch, seq_len, action_dim)
+    """
+    nonzero_mask = state[0].abs().sum(dim=1) > 0
+    index = nonzero_mask.float().argmin()
+    # get the first index of the first zero tensor
+    new_state = torch.clone(state).detach()
+    new_state[:, index, :] = action
+    return new_state
+
+
 def train(batch_size, trajectory_length, env, device, n_iterations,
-        min_policy_std, max_policy_std, savepath):
+        min_policy_std, max_policy_std, savepath, debug):
     """Continuous GFlowNet training loop, with the Trajectory Balance objective."""
     # seed_all(seed)
     # Default hyperparameters used.
-    forward_model, backward_model, logZ, optimizer = setup_experiment()
+    forward_model, backward_model, logZ, optimizer = setup_experiment(debug)
     losses = []
     tbar = trange(n_iterations)
     avg_log_reward = 0
 
     for it in tbar:
+        print(get_vram())
         optimizer.zero_grad()
 
         x = initalize_state(batch_size, device, env)
@@ -205,6 +194,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
             action = trajectory[:, t, :] - trajectory[:, t - 1, :]
             logPB += policy_dist.log_prob(action)
 
+        print(get_vram())
         log_reward = env.log_reward(x)
         avg_log_reward = log_reward.mean()
 
@@ -253,6 +243,19 @@ def inference(trajectory_length, forward_model, env, batch_size, min_policy_std,
     x = torch.nn.functional.sigmoid(x)
     return x
 
+def test__step():
+    x = torch.zeros(2, 4, 2)
+    z = torch.ones(2, 2, 2)
+    x[:, :2, :] = z
+    y = torch.rand(2, 2)
+    xx = step(x, y)
+
+    maskx = x.abs().sum(dim=2) > 0
+    indx = maskx.float().argmin(dim=1)
+    maskxx = xx.abs().sum(dim=2) > 0
+    indxx = maskxx.float().argmin(dim=1)
+    assert (indxx == indx + 1).all()
+
 
 if __name__ == "__main__":
 
@@ -266,29 +269,26 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float32
 
-    trajectory_length = 30
+    seq_len = 30
     min_policy_std = 0.1
     max_policy_std = 1.0
     batch_size = 16
     action_dim = 6
-    scatter_config = {"scattering_scale": 2, "scattering_angles": 8,
-                      "scattering_max_order": 2, "mlp_dim": 1024, "num_layers": 1,
-                      "output_dim": action_dim*2}
 
-    savedir = os.environ['SLURM_JOB_ID'] if debug is False else 'debug'
+    try:
+        savedir = os.environ['SLURM_JOB_ID'] if debug is False else 'debug'
+    except:
+        savedir = 'debug'
+
     savepath = os.path.join('outfiles', savedir)
-    os.makedirs(savepath, exist_ok=True)
-    with open(os.path.join(savepath, 'config.yml'), 'w') as f:
-        yaml.dump(scatter_config, f)
-    save_code(savepath)
 
     n_iterations = 5000 if debug is False else 2
     reward_fn = get_cpx_fields_unet_cnn_fompred()
-    env = PhotoEnv()
+    env = PhotoEnv(seq_len=seq_len)
     # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True) as prof:
     forward_model, backward_model, logZ = train(
-    batch_size, trajectory_length, env, device, n_iterations,
-    min_policy_std, max_policy_std, savepath)
+    batch_size, seq_len, env, device, n_iterations,
+    min_policy_std, max_policy_std, savepath, debug)
     # with open("cuda_prof.log", "w") as f:
     #     old_sdtout = sys.stdout
     #     sys.stdout = f
