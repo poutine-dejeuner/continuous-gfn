@@ -41,4 +41,6 @@ class SetTransformer(nn.Module):
                 nn.Linear(dim_hidden, dim_output))
 
     def forward(self, X):
-        return self.dec(self.enc(X))
+        y = self.enc(X)
+        z = self.dec(y)
+        return z

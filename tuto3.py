@@ -78,7 +78,7 @@ def get_policy_dist(env, model, x, min_policy_std, max_policy_std):
     A policy is a distribution we predict the parameters of using a neural
     network, which we then sample from.
     """
-    x = x.contiguous()
+    # x = x.contiguous()
     pf_params = model(x)  # Shape = [batch_shape, env.action_dim]
     pf_params = pf_params.squeeze()
     policy_mean = pf_params[:, 0: env.action_dim]
@@ -175,12 +175,13 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
 
         # Forward loop to generate full trajectory and compute logPF.
         for t in range(trajectory_length):
+            stats(x)
             policy_dist = get_policy_dist(env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
-            action.squeeze()
+            action = action.squeeze()
             logprob =policy_dist.log_prob(action)
-            logprob.squeeze()
-            logPF += logprob
+            logprob = logprob.squeeze()
+            logPF = logPF + logprob
             new_x = step(x, action)
             trajectory[:, t + 1, :] = action
             x = new_x
@@ -192,11 +193,11 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         for t in range(trajectory_length, 0, -1):
             policy_dist = get_policy_dist(env, backward_model, x, min_policy_std, max_policy_std)
             action = trajectory[:, t, :] - trajectory[:, t - 1, :]
-            logPB += policy_dist.log_prob(action)
+            logPB = logPB + policy_dist.log_prob(action)
 
         print(get_vram())
         log_reward = env.log_reward(x)
-        avg_log_reward = log_reward.mean()
+        avg_log_reward = torch.mean(log_reward)
 
         # Compute Trajectory Balance Loss.
         loss = (logZ + logPF - logPB - log_reward).pow(2).mean()
