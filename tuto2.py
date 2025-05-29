@@ -283,4 +283,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     debug = args.d
 
-    main(True)
+    main(debug)

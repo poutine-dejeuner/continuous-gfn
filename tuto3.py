@@ -9,7 +9,8 @@ import numpy as np
 import torch
 # from torch.profiler import profile, record_function, ProfilerActivity
 
-from tutoutils import (rbf, plot_samples_and_histogram, tonumpy, get_vram)
+from tutoutils import (rbf, plot_samples_and_histogram, tonumpy, get_vram,
+                        stats)
 from nanophoto.meep_compute_fom import compute_FOM_parallele
 from nanophoto.get_trained_models import get_cpx_fields_unet_cnn_fompred
 from set_transfo.models import SetTransformer
@@ -146,7 +147,7 @@ def step(state: torch.Tensor, action: torch.Tensor):
     nonzero_mask = state[0].abs().sum(dim=1) > 0
     index = nonzero_mask.float().argmin()
     # get the first index of the first zero tensor
-    new_state = torch.clone(state).detach()
+    new_state = torch.clone(state)
     new_state[:, index, :] = action
     return new_state
 
@@ -175,16 +176,18 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
 
         # Forward loop to generate full trajectory and compute logPF.
         for t in range(trajectory_length):
-            stats(x)
             policy_dist = get_policy_dist(env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
             action = action.squeeze()
             logprob =policy_dist.log_prob(action)
-            logprob = logprob.squeeze()
-            logPF = logPF + logprob
+            logprob = torch.squeeze(logprob)
+            logPF = logPF.clone() + logprob
             new_x = step(x, action)
+            trajectory = trajectory.clone()
             trajectory[:, t + 1, :] = action
             x = new_x
+            ic(action.shape, logprob.shape, logPF.shape,
+               new_x.shape, trajectory.shape)
 
         del policy_dist, action, new_x
         torch.cuda.empty_cache()
@@ -193,7 +196,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         for t in range(trajectory_length, 0, -1):
             policy_dist = get_policy_dist(env, backward_model, x, min_policy_std, max_policy_std)
             action = trajectory[:, t, :] - trajectory[:, t - 1, :]
-            logPB = logPB + policy_dist.log_prob(action)
+            logPB = logPB.clone() + policy_dist.log_prob(action)
 
         print(get_vram())
         log_reward = env.log_reward(x)
