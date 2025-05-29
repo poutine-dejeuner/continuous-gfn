@@ -46,6 +46,10 @@ def tonumpy(tensor):
 def stats(array):
     ic(array.min(), array.max(), array.mean())
 
+def normalise(images):
+    if (images == 0.).all() or (images == 1.).all():
+        return images
+    return (images - images.min()) / (images.max() - images.min())
 
 def plot_samples_and_histogram(samples, scores, N, savepath):
     """
