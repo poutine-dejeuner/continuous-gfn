@@ -9,37 +9,31 @@ from icecream import ic
 def normalise(image):
     return (image - image.min()) / (image.max() - image.min())
 
-def rbf(centers, covariances, amplitudes, image_shape=(101,91)):
+def rbf(centers, covariances, amplitudes, grid_points, image_shape):
     assert centers.shape[0:2] == covariances.shape[0:2] == amplitudes.shape[0:2]
 
     dtype = torch.float
-    centers = type(centers)
     device = centers.device
 
-    covariance_mat = torch.zeros(covariances.shape[:-1] +  (2, 2), device=device)
+    cov_shape = covariances.shape[:-1] +  (2, 2)
+    covariance_mat = torch.zeros(size=cov_shape, device=device)
     covariance_mat[..., 0, 0] = covariances[..., 0]
     covariance_mat[..., 1, 1] = covariances[..., 1]
     covariance_mat[..., 0, 1] = covariances[..., 2]
     covariance_mat[..., 1, 0] = covariances[..., 2]
 
-    # Create a grid of points
-    x = np.linspace(0, 1, image_shape[0])
-    y = np.linspace(0, 1, image_shape[1])
-
-    X, Y = np.meshgrid(x, y)
-    grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
-    n_gridpoints = grid_points.shape[0]
-    grid_points = torch.tensor(grid_points, dtype=dtype, device=device)
 
     centers = centers.unsqueeze(-2)
+    n_gridpoints = grid_points.shape[0]
     centers = torch.repeat_interleave(centers, repeats=n_gridpoints, dim=-2)
     diff = grid_points - centers
     z = torch.einsum('...ij,...jk,...ik->...i', diff, covariance_mat, diff)
     z = torch.exp(-0.5 * z)
-    amplitudes = amplitudes.unsqueeze(-1).expand_as(z)
+    amplitudes = amplitudes.expand_as(z)
     z = z * amplitudes
     z = z.sum(-2)
-    z = z.reshape(z.shape[:-1] + (image_shape[1], image_shape[0]))
+    z_shape = z.shape[:-1] + (image_shape[1], image_shape[0])
+    z = z.reshape(z_shape)
     z = torch.transpose(z, -1, -2)
     return z
 
@@ -55,6 +49,7 @@ class RBFImageCollection(nn.Module):
         rows, cols = image_shape
         if centers.numel() != 0:
             self.device = centers.device
+            self.dtype = centers.dtype
             assert centers.shape[0] == covariances.shape[0] == amplitudes.shape[0], \
                 f"Centers shape: {centers.shape}, " \
                 f"Covariances shape: {covariances.shape}, " \
@@ -73,6 +68,7 @@ class RBFImageCollection(nn.Module):
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else
                                        "cpu")
+            self.dtype = torch.float32
             self.centers = nn.Parameter(torch.randn(num_images, num_rbf, 2))
             self.covariances= nn.Parameter(torch.rand(num_images, num_rbf, 3))
             self.amplitudes = nn.Parameter(torch.randn(num_images, num_rbf, 1))
@@ -91,39 +87,44 @@ class RBFImageCollection(nn.Module):
         self.grid = self.make_grid(rows, cols)
 
     def rbf_function(self, coords):
-        x, y = coords
-        value = torch.zeros_like(x, dtype=torch.float32)
-        for i in range(self.num_rbf):
-            cx, cy = self.centers[i]
-            sigma = torch.exp(self.log_widths[i])
-            w = self.weights[i]
-            value += w * \
-                torch.exp(-((x - cx)**2 + (y - cy)**2) / (2 * sigma**2))
-        return value + self.bias
+        # x, y = coords[:,0], coords[:,1]
+        out = rbf(self.centers, self.covariances, self.amplitudes, coords,
+                  self.image_shape)
+        out = out.unsqueeze(1)
+        return out
 
     def make_grid(self, rows, cols):
-        r = torch.arange(rows, dtype=torch.float32)
-        c = torch.arange(cols, dtype=torch.float32)
-        r_grid, c_grid = torch.meshgrid(r, c, indexing='ij')
-        grid = (c_grid.to(self.device), r_grid.to(self.device))
-        return grid
+        x = np.linspace(-1, 1, cols)
+        y = np.linspace(-1, 1, rows)
+
+        X, Y = np.meshgrid(x, y)
+        grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
+        n_gridpoints = grid_points.shape[0]
+        grid_points = torch.tensor(grid_points, dtype=self.dtype, device=self.device)
+
+        return grid_points
 
     def forward(self):
         output = self.rbf_function(self.grid)
         return torch.sigmoid(output)
 
 
-def optimize_rbf_coll(target_images_np, num_rbf=20, learning_rate=0.01, num_epochs=5000):
+def optimize_rbf_coll(parameters, target_images_np, num_rbf=20, learning_rate=0.01, num_epochs=5000):
     assert target_images_np.min() >= 0 and target_images_np.max() <= 1
 
-    image_shape = target_images_np[0].shape
+    if target_images_np.ndim == 2:
+        image_shape = target_images_np.shape
+    elif target_images_np.ndim == 3:
+        image_shape = target_images_np.shape[1:]
+    else:
+        raise ValueError("target_images_np must be 2D or 3D array.")
     num_images = target_images_np.shape[0]
     target_images_torch = torch.tensor(np.array(
         target_images_np), dtype=torch.float32).unsqueeze(1)  # [batch_size, C, H, W]
 
     # Use GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RBFImageCollection(num_images, num_rbf, image_shape).to(device)
+    model = RBFImageCollection(num_images, num_rbf, image_shape, *parameters).to(device)
     target_images_torch = target_images_torch.to(device)
 
     # Define loss function and optimizer
@@ -136,16 +137,39 @@ def optimize_rbf_coll(target_images_np, num_rbf=20, learning_rate=0.01, num_epoc
         output = model()  # .unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
         # Compare with each image in the batch
         loss = criterion(output, target_images_torch)
-        loss.mean().backward()
+        loss = loss.mean(dim=tuple(range(1, loss.ndim)))
+        meanloss = loss.mean()
+        meanloss.backward()
         optimizer.step()
 
         if epoch % 500 == 0:
-            print(f'Epoch {epoch}/{num_epochs}, Loss: {loss.item():.4f}')
+            print(f'Epoch {epoch}/{num_epochs}, Loss: {meanloss.item():.4f}')
 
     # Return the parameters
     return {'centers': model.centers.detach().cpu(),
             'covariances': model.covariances.detach().cpu(),
             'amplitudes': model.amplitudes.detach().cpu()}, loss
+
+def optimize_rbf_iterative_oneimage(target_image_np, max_num_rbf=20,
+                           learning_rate=0.01, num_epochs=5000,
+                           threshold=0.01):
+    centers = torch.empty(1, 0, 2)
+    covariances = torch.empty(1, 0, 3)
+    amplitudes = torch.empty(1, 0, 1)
+
+    for i in range(max_num_rbf):
+        params = [centers, covariances, amplitudes]
+        print(f"Optimizing RBF {i + 1}/{max_num_rbf}")
+        new_params, loss = optimize_rbf_coll(params, target_image_np, num_rbf=i + 1,
+                                         learning_rate=learning_rate,
+                                         num_epochs=num_epochs)
+        if loss < threshold:
+            break
+    centers = torch.cat((centers, new_params['centers']), dim=1)
+    covariances = torch.cat((covariances, new_params['covariances']), dim=1)
+    amplitudes = torch.cat((amplitudes, new_params['amplitudes']), dim=1)
+
+    return (centers, covariances, amplitudes)
 
 def optimize_rbf_iterative(target_images_np, max_num_rbf=20,
                            learning_rate=0.01, num_epochs=5000,
@@ -155,7 +179,7 @@ def optimize_rbf_iterative(target_images_np, max_num_rbf=20,
     fit the parameters of max_num_rbf gaussian functions one at a time.
     """
     target_images = torch.tensor(target_images_np)
-    done_indices = torch.tensor(0)
+    done_indices = torch.empty(0)
     done_centers = torch.empty(0, 0, 2)
     done_covariances = torch.empty(0, 0, 3)
     done_amplitudes = torch.empty(0, 0, 1)
@@ -188,9 +212,11 @@ def optimize_rbf_iterative(target_images_np, max_num_rbf=20,
             covariances = remove_idx(params['covariances'], done_idx, dim=0)
             amplitudes = remove_idx(params['amplitudes'], done_idx, dim=0)
             target_images = remove_idx(target_images, done_idx, dim=0)
+    ic(done_centers.shape, params['centers'].shape)
     centers = torch.cat((done_centers, params['centers']), dim=0)
     covariances = torch.cat((done_covariances, params['covariances']), dim=0)
     amplitudes = torch.cat((done_amplitudes, params['amplitudes']), dim=0)
+    ic(done_images.shape, target_images.shape)
     images = torch.cat((done_images, target_images), dim=0)
 
     return (centers, covariances, amplitudes), images
@@ -234,14 +260,15 @@ def print_iamges(target_images_np, model):
         plt.savefig(f'test{i}.png')
 
 
-if __name__ == "__main__":
+def fit_topoptim():
     debug = True
     path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
     path = os.path.expanduser(path)
     num_images = -1 if not debug else 4
     num_epochs = 5000 if not debug else 100
-    images = normalise(np.load(path))
-    params, images = optimize_rbf_iterative(images, max_num_rbf=20,
+    max_num_rbf = 20 if not debug else 2
+    images = normalise(np.load(path)[:num_images])
+    params, images = optimize_rbf_iterative(images, max_num_rbf=max_num_rbf,
                                                 learning_rate=0.01,
                                             num_epochs=num_epochs,
                                                 threshold=0.01) 
@@ -252,3 +279,25 @@ if __name__ == "__main__":
     print_iamges(images, coll)
     np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
             params.numpy())
+
+def fit_une_image():
+    debug = True
+    path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
+    path = os.path.expanduser(path)
+    num_epochs = 5000 if not debug else 100
+    max_num_rbf = 20 if not debug else 2
+    image = normalise(np.load(path)[:1])
+    ic(image.shape)
+    params = optimize_rbf_iterative_oneimage(image, max_num_rbf=max_num_rbf,
+                                                learning_rate=0.01,
+                                            num_epochs=num_epochs,
+                                                threshold=0.01) 
+    coll = RBFImageCollection(
+        num_images=image.shape[0], num_rbf=params[0].shape[1],
+        image_shape=image.shape[2:], centers=params[0],
+        covariances=params[1], amplitudes=params[2])
+    print_iamges(image, coll)
+    np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
+            params.numpy())
+if __name__ == "__main__":
+    fit_une_image()
