@@ -12,8 +12,8 @@ def normalise(image):
 def rbf(centers, covariances, amplitudes, grid_points, image_shape):
     assert centers.shape[0:2] == covariances.shape[0:2] == amplitudes.shape[0:2]
 
-    dtype = torch.float
     device = centers.device
+    dtype = centers.dtype
 
     cov_shape = covariances.shape[:-1] +  (2, 2)
     covariance_mat = torch.zeros(size=cov_shape, device=device)
@@ -21,7 +21,6 @@ def rbf(centers, covariances, amplitudes, grid_points, image_shape):
     covariance_mat[..., 1, 1] = covariances[..., 1]
     covariance_mat[..., 0, 1] = covariances[..., 2]
     covariance_mat[..., 1, 0] = covariances[..., 2]
-
 
     centers = centers.unsqueeze(-2)
     n_gridpoints = grid_points.shape[0]
@@ -32,9 +31,10 @@ def rbf(centers, covariances, amplitudes, grid_points, image_shape):
     amplitudes = amplitudes.expand_as(z)
     z = z * amplitudes
     z = z.sum(-2)
-    z_shape = z.shape[:-1] + (image_shape[1], image_shape[0])
+    z_shape = z.shape[:-1] + (image_shape[0], image_shape[1])
     z = z.reshape(z_shape)
-    z = torch.transpose(z, -1, -2)
+    # z = torch.transpose(z, -1, -2)
+    assert z.shape == (centers.shape[0], image_shape[0], image_shape[1])
     return z
 
 
@@ -55,7 +55,7 @@ class RBFImageCollection(nn.Module):
                 f"Covariances shape: {covariances.shape}, " \
                 f"Amplitudes shape: {amplitudes.shape}"
 
-            assert centers.ndim == amplitudes.ndim == 3 and covariances.ndim == 4, \
+            assert centers.ndim == covariances.ndim == amplitudes.ndim ==  3, \
                 f"Centers ndim: {centers.ndim}, " \
                 f"Covariances ndim: {covariances.ndim}, " \
                 f"Amplitudes ndim: {amplitudes.ndim}"
@@ -84,7 +84,7 @@ class RBFImageCollection(nn.Module):
             self.amplitudes = torch.cat((self.amplitudes, new_amplitudes),
                                         dim=1)
 
-        self.grid = self.make_grid(rows, cols)
+        self.grid = make_grid(rows, cols).to(self.device, self.dtype)
 
     def rbf_function(self, coords):
         # x, y = coords[:,0], coords[:,1]
@@ -93,23 +93,26 @@ class RBFImageCollection(nn.Module):
         out = out.unsqueeze(1)
         return out
 
-    def make_grid(self, rows, cols):
-        x = np.linspace(-1, 1, cols)
-        y = np.linspace(-1, 1, rows)
-
-        X, Y = np.meshgrid(x, y)
-        grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
-        n_gridpoints = grid_points.shape[0]
-        grid_points = torch.tensor(grid_points, dtype=self.dtype, device=self.device)
-
-        return grid_points
 
     def forward(self):
         output = self.rbf_function(self.grid)
         return torch.sigmoid(output)
 
 
-def optimize_rbf_coll(parameters, target_images_np, num_rbf=20, learning_rate=0.01, num_epochs=5000):
+def make_grid(rows, cols):
+    """
+    Makes a grid of (row * cols) points in the range [-1, 1]. returns a tensor
+    of shape (rows * cols, 2) where each row is a point (x, y) in the grid.
+    """
+    x = np.linspace(-1, 1, cols)
+    y = np.linspace(-1, 1, rows)
+    X, Y = np.meshgrid(x, y)
+    grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
+    grid_points = torch.tensor(grid_points)
+
+    return grid_points
+
+def optimize_rbf_coll(target_images_np, parameters=torch.empty(0), num_rbf=20, learning_rate=0.01, num_epochs=5000):
     assert target_images_np.min() >= 0 and target_images_np.max() <= 1
 
     if target_images_np.ndim == 2:
@@ -146,9 +149,9 @@ def optimize_rbf_coll(parameters, target_images_np, num_rbf=20, learning_rate=0.
             print(f'Epoch {epoch}/{num_epochs}, Loss: {meanloss.item():.4f}')
 
     # Return the parameters
-    return {'centers': model.centers.detach().cpu(),
-            'covariances': model.covariances.detach().cpu(),
-            'amplitudes': model.amplitudes.detach().cpu()}, loss
+    return {'centers': model.centers.detach(),
+            'covariances': model.covariances.detach(),
+            'amplitudes': model.amplitudes.detach()}, loss, model
 
 def optimize_rbf_iterative_oneimage(target_image_np, max_num_rbf=20,
                            learning_rate=0.01, num_epochs=5000,
@@ -212,11 +215,9 @@ def optimize_rbf_iterative(target_images_np, max_num_rbf=20,
             covariances = remove_idx(params['covariances'], done_idx, dim=0)
             amplitudes = remove_idx(params['amplitudes'], done_idx, dim=0)
             target_images = remove_idx(target_images, done_idx, dim=0)
-    ic(done_centers.shape, params['centers'].shape)
     centers = torch.cat((done_centers, params['centers']), dim=0)
     covariances = torch.cat((done_covariances, params['covariances']), dim=0)
     amplitudes = torch.cat((done_amplitudes, params['amplitudes']), dim=0)
-    ic(done_images.shape, target_images.shape)
     images = torch.cat((done_images, target_images), dim=0)
 
     return (centers, covariances, amplitudes), images
@@ -239,65 +240,145 @@ def remove_idx(tensors, indices, dim):
 
     return out
 
-def print_iamges(target_images_np, model):
+def print_images(target_images_np, model):
     # Generate the replicated image (let's just take the first one for visualization)
     model.eval()
     with torch.no_grad():
         replicated_image_torch = model().cpu()
-        replicated_image_np = replicated_image_torch.numpy()
+        replicated_image_np = replicated_image_torch.numpy().squeeze()
 
     # Visualize the results (comparing the first target image with the generated one)
     for i in range(4):
         plt.figure(figsize=(10, 5))
 
         plt.subplot(1, 2, 1)
-        plt.imshow(target_images_np[0])
+        plt.imshow(target_images_np[0].squeeze())
         plt.title('First Original Image')
 
         plt.subplot(1, 2, 2)
-        plt.imshow(replicated_image_np)
+        plt.imshow(replicated_image_np[i])
         plt.title('Generated Image (Shared Parameters)')
         plt.savefig(f'test{i}.png')
 
 
+def eval_single_param_error(target_images, params, grid, image_shape):
+    """
+    Prend des paramètres de RBF params fittés aux images target_images et prend
+    chaque slice de param pour générer une image utilisant un seul triplet
+    centre, covariance, amplitude et calcule l'erreur avec l'image cible. Les
+    paramètres sont classés selon cette erreure.
+    """
+    if type(target_images) is np.ndarray:
+        target_images = torch.tensor(target_images, dtype=torch.float32,
+                                     device=params[0].device)
+    centers, covariances, amplitudes = params
+    assert centers.shape[0] == covariances.shape[0] == amplitudes.shape[0], \
+        f"Centers shape: {centers.shape}, " \
+        f"Covariances shape: {covariances.shape}, " \
+        f"Amplitudes shape: {amplitudes.shape}"
+
+    errors = torch.empty((centers.shape[0], 0), device=centers.device)
+    for i in range(centers.shape[1]):
+        image = rbf(centers[:,i:i+1,:], covariances[:,i:i+1,:],
+                    amplitudes[:,i:i+1,:],
+                    grid, image_shape)
+        error = torch.abs(image - target_images).mean(dim=(-2, -1))
+        errors = torch.cat((errors, error.unsqueeze(1)), dim=1)
+    assert errors.shape == centers.shape[:-1], f"""{errors.shape},
+                                                {centers.shape}"""
+    return errors
+
+
+def retire_rbf_params_faibles(images, params, grid, threshold=0.01):
+    device = params[0].device
+    errors = eval_single_param_error(images, params, grid, images.shape[-2:])
+    errors, idx = torch.sort(errors, dim=1, descending=True)
+    params = torch.cat(params, dim=-1)
+    # reorder params in dim=1 according to the sorted indices
+    params = torch.gather(params, dim=1, index=idx.unsqueeze(-1).expand(
+        -1, -1, params.shape[-1]))
+
+    # get smallest column index where the mask is True, if none then set to -1
+    mask = errors > threshold
+    idx = torch.where(mask.any(dim=1), mask.float().argmax(dim=1),
+                      torch.full((errors.size(0),), -1).to(device))
+    # make a mask that is True for indices less than idx
+    row_idx = torch.arange(errors.size(1)).unsqueeze(0).expand(errors.size(0),
+                                                               -1).to(device)
+    mask = (row_idx <= idx.unsqueeze(1)).int()
+
+    # for each element in params, set entries to 0 for indices greater than idx
+    mask = mask.unsqueeze(-1).expand_as(params)
+    params = params * mask
+    return params
+
 def fit_topoptim():
-    debug = True
+    debug = False
     path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
     path = os.path.expanduser(path)
     num_images = -1 if not debug else 4
     num_epochs = 5000 if not debug else 100
-    max_num_rbf = 20 if not debug else 2
+    num_rbf = 20 if not debug else 2
+    threshold = 0.01
+
     images = normalise(np.load(path)[:num_images])
-    params, images = optimize_rbf_iterative(images, max_num_rbf=max_num_rbf,
+
+    params, loss, model = optimize_rbf_coll(images, torch.empty(0), num_rbf=num_rbf,
                                                 learning_rate=0.01,
-                                            num_epochs=num_epochs,
-                                                threshold=0.01) 
+                                            num_epochs=num_epochs) 
+
+    params = (params['centers'], params['covariances'], params['amplitudes'])
+    grid = model.grid
+    params = retire_rbf_params_faibles(images, params, grid, threshold=threshold)
+    centers = params[...,:2]
+    covariances = params[...,2:5]
+    amplitudes = params[...,5:]
+
     coll = RBFImageCollection(
         num_images=images.shape[0], num_rbf=params[0].shape[1],
-        image_shape=images.shape[2:], centers=params[0],
-        covariances=params[1], amplitudes=params[2])
-    print_iamges(images, coll)
+        image_shape=images.shape[-2:], centers=centers,
+        covariances=covariances, amplitudes=amplitudes)
+
+    print_images(images, coll)
     np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
-            params.numpy())
+            params.cpu().numpy())
 
 def fit_une_image():
-    debug = True
+    # debug = True
+    debug = False
     path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
     path = os.path.expanduser(path)
     num_epochs = 5000 if not debug else 100
     max_num_rbf = 20 if not debug else 2
     image = normalise(np.load(path)[:1])
-    ic(image.shape)
     params = optimize_rbf_iterative_oneimage(image, max_num_rbf=max_num_rbf,
                                                 learning_rate=0.01,
                                             num_epochs=num_epochs,
                                                 threshold=0.01) 
+
     coll = RBFImageCollection(
         num_images=image.shape[0], num_rbf=params[0].shape[1],
-        image_shape=image.shape[2:], centers=params[0],
+        image_shape=image.shape[-2:], centers=params[0],
         covariances=params[1], amplitudes=params[2])
-    print_iamges(image, coll)
+    print_images(image, coll)
+    params = torch.cat(params, dim=-1)
     np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
             params.numpy())
+
+def test__rbf():
+    n_im = 4
+    param = torch.rand(n_im, 20, 6)
+    grid = make_grid(101, 91).to(torch.float)
+    im = rbf(param[:, :, :2], param[:, :, 2:5], param[:, :, 5:], grid, (101,
+             91))
+    _, axes = plt.subplots(n_im, 1, figsize=(10, 10))
+    for i in range(n_im):
+        axes[i].imshow(im[i].cpu().numpy())
+        axes[i].set_axis_off()
+        # axes[i].set_title(f"Image {i + 1}")
+    plt.show()
+
+
 if __name__ == "__main__":
-    fit_une_image()
+    # test__rbf()
+    fit_topoptim()
