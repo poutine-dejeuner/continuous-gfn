@@ -1,3 +1,7 @@
+"""
+    state space (seq_len, action_dim)
+    action space (6,)
+"""
 import gc
 import os
 import sys

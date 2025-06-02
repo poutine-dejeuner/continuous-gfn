@@ -1,4 +1,6 @@
-import os
+import os, sys
+from functools import wraps
+import linecache
 import shutil
 import torch
 import torch.nn as nn
@@ -17,6 +19,49 @@ class CustomResNet152(nn.Module):
     def forward(self, x):
         return self.base(x)
 
+def trace_gpu_memory(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        mainfile = os.path.abspath(func.__code__.co_filename)
+
+        def tracer(frame, event, arg):
+            if event == 'line':
+                filename = os.path.abspath(frame.f_code.co_filename)
+                if filename != mainfile:
+                    return tracer  # skip other files
+
+                lineno = frame.f_lineno
+                line = linecache.getline(filename, lineno).strip()
+                print(f"[line {lineno}] {line}")
+                ic(torch.cuda.memory_allocated()/1e9)
+
+            return tracer
+
+        sys.settrace(tracer)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            sys.settrace(None)
+
+    return wrapper
+
+def model_mem_use(model):
+    """
+    Get the memory usage of a model.
+    out: number of parameters, memory use
+    """
+    num_params = 0
+    for param in model.parameters():
+        num_params += param.numel()
+    mem = num_params * param.element_size()
+    return num_params, mem / (1024 ** 2)  # Convert to MB
+
+def get_model_grad_norm(model):
+    norm = 0
+    for p in model.parameters():
+        norm += torch.norm(p.grad.flatten())**2
+    norm = torch.sqrt(norm).item()
+    return norm
 
 def save_code(savepath):
     if not os.path.exists(os.path.join(savepath, 'code.py')):
@@ -78,7 +123,6 @@ def plot_samples_and_histogram(samples, scores, N, savepath):
 
     # Create a histogram of scores
     plt.figure(figsize=(8, 6))
-    ic(scores)
     plt.hist(scores, bins=30, color='blue', alpha=0.7)
     plt.title('Histogram of Scores')
     plt.xlabel('Score')
@@ -122,8 +166,8 @@ def rbf(parameters, image_shape=(101,91)):
     covariance_mat[..., 1, 0] = covariances[..., 2]
 
     # Create a grid of points
-    x = np.linspace(0, 1, image_shape[0])
-    y = np.linspace(0, 1, image_shape[1])
+    x = np.linspace(-1, 1, image_shape[0])
+    y = np.linspace(-1, 1, image_shape[1])
 
     X, Y = np.meshgrid(x, y)
     grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
@@ -154,6 +198,63 @@ def rbf(parameters, image_shape=(101,91)):
     if paramtype is np.ndarray:
         z = z.numpy()
     return z
+
+class RBFImageCollection(nn.Module):
+    def __init__(self, num_images, num_rbf, image_shape, weights=None,
+                    centers=None, widths=None, bias=None):
+        super().__init__()
+        self.num_rbf = num_rbf
+        self.image_shape = image_shape
+        rows, cols = image_shape
+        # init weights, centers, widths and bias to random values if they are
+        # not provided
+        if (weights is not None and centers is not None and widths is not None
+            and bias is not None):
+            self.weights = nn.Parameter(weights)
+            self.centers = nn.Parameter(centers)
+            self.log_widths = nn.Parameter(widths)
+            self.bias = nn.Parameter(bias)
+        else:
+            self.weights = nn.Parameter(torch.randn(num_rbf, num_images))
+            self.centers = nn.Parameter(torch.rand(
+                num_rbf, 2) * torch.tensor([cols, rows], dtype=torch.float32))
+            self.log_widths = nn.Parameter(torch.randn(num_rbf, num_images))
+            self.bias = nn.Parameter(torch.randn(1) * 0.1)
+
+    def rbf_function(self, coords):
+        x, y = coords
+        value = torch.zeros_like(x, dtype=torch.float32)
+        for i in range(self.num_rbf):
+            cx, cy = self.centers[i]
+            sigma = torch.exp(self.log_widths[i])
+            w = self.weights[i]
+            value += w * \
+                torch.exp(-((x - cx)**2 + (y - cy)**2) / (2 * sigma**2))
+        return value + self.bias
+
+    def forward(self):
+        device = self.weights.device
+        rows, cols = self.image_shape
+        r = torch.arange(rows, dtype=torch.float32)
+        c = torch.arange(cols, dtype=torch.float32)
+        r_grid, c_grid = torch.meshgrid(r, c, indexing='ij')
+        coords = (c_grid.to(device), r_grid.to(device))
+        output = self.rbf_function(coords)
+        return torch.sigmoid(output)
+
+def log_tensor_mem():
+    import gc
+    total = 0
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.is_cuda:
+                mem = obj.element_size() * obj.nelement()
+                print(
+                    f"{type(obj)} | shape: {tuple(obj.shape)} | {mem / 1024**2:.2f} MB")
+                total += mem
+        except Exception:
+            pass
+    print(f"[Total Tensor GPU Mem] {total / 1024**2:.2f} MB\n")
 
 
 if __name__ == "__main__":
