@@ -241,6 +241,8 @@ def remove_idx(tensors, indices, dim):
     return out
 
 def print_images(target_images_np, model):
+    savepath = 'test_img'
+    os.makedirs(savepath, exist_ok=True)
     # Generate the replicated image (let's just take the first one for visualization)
     model.eval()
     with torch.no_grad():
@@ -258,7 +260,7 @@ def print_images(target_images_np, model):
         plt.subplot(1, 2, 2)
         plt.imshow(replicated_image_np[i])
         plt.title('Generated Image (Shared Parameters)')
-        plt.savefig(f'test{i}.png')
+        plt.savefig(os.path.join(savepath, f'test{i}.png'))
 
 
 def eval_single_param_error(target_images, params, grid, image_shape):
@@ -312,44 +314,13 @@ def retire_rbf_params_faibles(images, params, grid, threshold=0.01):
     params = params * mask
     return params
 
-def fit_topoptim():
-    debug = False
-    path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
-    path = os.path.expanduser(path)
-    num_images = -1 if not debug else 4
-    num_epochs = 5000 if not debug else 100
-    num_rbf = 20 if not debug else 2
-    threshold = 0.01
-
-    images = normalise(np.load(path)[:num_images])
-
-    params, loss, model = optimize_rbf_coll(images, torch.empty(0), num_rbf=num_rbf,
-                                                learning_rate=0.01,
-                                            num_epochs=num_epochs) 
-
-    params = (params['centers'], params['covariances'], params['amplitudes'])
-    grid = model.grid
-    params = retire_rbf_params_faibles(images, params, grid, threshold=threshold)
-    centers = params[...,:2]
-    covariances = params[...,2:5]
-    amplitudes = params[...,5:]
-
-    coll = RBFImageCollection(
-        num_images=images.shape[0], num_rbf=params[0].shape[1],
-        image_shape=images.shape[-2:], centers=centers,
-        covariances=covariances, amplitudes=amplitudes)
-
-    print_images(images, coll)
-    np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
-            params.cpu().numpy())
-
 def fit_une_image():
     # debug = True
     debug = False
     path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
     path = os.path.expanduser(path)
     num_epochs = 5000 if not debug else 100
-    max_num_rbf = 20 if not debug else 2
+    max_num_rbf = 30 if not debug else 2
     image = normalise(np.load(path)[:1])
     params = optimize_rbf_iterative_oneimage(image, max_num_rbf=max_num_rbf,
                                                 learning_rate=0.01,
@@ -377,6 +348,40 @@ def test__rbf():
         axes[i].set_axis_off()
         # axes[i].set_title(f"Image {i + 1}")
     plt.show()
+
+def fit_topoptim():
+    debug = False
+    # debug = True
+    path = "~/scratch/nanophoto/topoptim/fulloptim/images.npy"
+    path = os.path.expanduser(path)
+    # num_images = -1 if not debug else 4
+    num_images = 4
+    num_epochs = 2000 if not debug else 100
+    num_rbf = 50 if not debug else 2
+    learning_rate = 0.1
+    threshold = 0.01
+
+    images = normalise(np.load(path)[:num_images])
+
+    params, loss, model = optimize_rbf_coll(images, torch.empty(0), num_rbf=num_rbf,
+                                                learning_rate=learning_rate,
+                                            num_epochs=num_epochs) 
+
+    params = (params['centers'], params['covariances'], params['amplitudes'])
+    grid = model.grid
+    params = retire_rbf_params_faibles(images, params, grid, threshold=threshold)
+    centers = params[...,:2]
+    covariances = params[...,2:5]
+    amplitudes = params[...,5:]
+
+    coll = RBFImageCollection(
+        num_images=images.shape[0], num_rbf=params[0].shape[1],
+        image_shape=images.shape[-2:], centers=centers,
+        covariances=covariances, amplitudes=amplitudes)
+
+    print_images(images, coll)
+    np.save(os.path.join(os.path.dirname(path), "gaussian_params.npy"),
+            params.cpu().numpy())
 
 
 if __name__ == "__main__":
