@@ -110,7 +110,7 @@ def test__forward_model(forward_model):
     ic(mean, std)
 
 
-test__trained_forward_model_output()
-test__untrained_model()
-# test__rbf()
+# test__trained_forward_model_output()
+# test__untrained_model()
+test__rbf()
 # test__action_parameters_to_state_space()

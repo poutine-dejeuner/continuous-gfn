@@ -28,7 +28,9 @@ sys.path.append(
 Le modele genere un seul design. Il y a un probleme avec les modeles PF et
 PB...
 TODO: il faut qu'a l'initialisation les forward/backward models produisent des
-valeurs qui correspondent a l'espace d'action.
+valeurs qui correspondent a l'espace d'action. Dans des tests de fit par
+descente de gradient, j'ai remarqué que quand les centres étaient pas bien
+initialisé ça pouvait complètement bloquer l'apprentissage.
 """
 
 
