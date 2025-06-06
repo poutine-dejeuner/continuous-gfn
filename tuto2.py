@@ -79,14 +79,14 @@ class PhotoEnv():
         return logre
 
 
-def get_policy_dist(env, model, x, min_policy_std, max_policy_std):
+def get_policy_dist(env, model, state, min_policy_std, max_policy_std):
     """
     A policy is a distribution we predict the parameters of using a neural
     network, which we then sample from.
     """
-    x = x.unsqueeze(1)
-    x = x.contiguous()
-    pf_params = model(x)  # Shape = [batch_shape, env.action_dim]
+    state = state.unsqueeze(1)
+    state = state.contiguous()
+    pf_params = model(state)  # Shape = [batch_shape, env.action_dim]
     policy_mean = pf_params[:, 0: env.action_dim]
     policy_std = pf_params[:, env.action_dim:]
     policy_std = torch.clamp(policy_std, min_policy_std, max_policy_std)

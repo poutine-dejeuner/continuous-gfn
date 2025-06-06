@@ -154,8 +154,8 @@ def rbf(parameters, image_shape=(101,91)):
 
     # Unpack parameters
     centers = parameters[..., :, :2]
-    centers[...,0] = centers[...,0]/image_shape[0]
-    centers[...,1] = centers[...,1]/image_shape[1]
+    centers[...,0] = centers[...,0]
+    centers[...,1] = centers[...,1]
     covariances = parameters[..., :, 2:5]
     amplitudes = parameters[..., :, 5]
     # covariance_mat is an array of shape (N, 2, 2)
@@ -168,6 +168,11 @@ def rbf(parameters, image_shape=(101,91)):
     # Create a grid of points
     x = np.linspace(-1, 1, image_shape[0])
     y = np.linspace(-1, 1, image_shape[1])
+
+    assert centers[...,0].min() >= -1
+    assert centers[...,1].min() >= -1
+    assert centers[...,0].max() <= 1
+    assert centers[...,1].max() <= 1
 
     X, Y = np.meshgrid(x, y)
     grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
