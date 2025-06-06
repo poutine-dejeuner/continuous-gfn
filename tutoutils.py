@@ -164,18 +164,18 @@ def rbf(parameters, image_shape=(101,91)):
     covariance_mat[..., 1, 1] = covariances[..., 1]
     covariance_mat[..., 0, 1] = covariances[..., 2]
     covariance_mat[..., 1, 0] = covariances[..., 2]
-
-    # Create a grid of points
-    x = np.linspace(-1, 1, image_shape[0])
-    y = np.linspace(-1, 1, image_shape[1])
-
     assert centers[...,0].min() >= -1
     assert centers[...,1].min() >= -1
     assert centers[...,0].max() <= 1
     assert centers[...,1].max() <= 1
 
+
+    # Create a grid of points
+    x = np.linspace(-1, 1, image_shape[0])
+    y = np.linspace(-1, 1, image_shape[1])
     X, Y = np.meshgrid(x, y)
     grid_points = np.stack((X.flatten(), Y.flatten()), axis=-1)
+
     n_gridpoints = grid_points.shape[0]
     # grid_points = np.expand_dims(grid_points, axis=0)
     # grid_points = np.repeat(grid_points, len(parameters), axis=0)

@@ -17,13 +17,28 @@ class BetaNormal(Distribution):
 
     def __init__(self, beta_concentration1, beta_concentration0, normal_mean,
             normal_cov_root, validate_args=None):
+        """
+        beta_concentration1: (..., M)
+        beta_concentration0: (..., M)
+        normal_mean: (..., N)
+        normal_cov_root: (..., N, N)
+        """
+        assert (normal_mean.shape[-1] == normal_cov_root.shape[-1] ==
+            normal_cov_root.shape[-2]), f"""{normal_cov_root.shape}"""
+
         self.beta_concentration1 = beta_concentration1
         self.beta_concentration0 = beta_concentration0
+
         self.normal_mean = normal_mean
         self.normal_cov_root = normal_cov_root
+        ic(normal_cov_root.shape)
+        # ic(normal_cov_root)
+        ic(normal_cov_root[0])
+        input()
         # produit de matrices
         self.normal_cov = torch.einsum("...ij, ...jk->...ik", normal_cov_root,
                                             normal_cov_root.transpose(-2, -1))
+        ic(self.normal_cov[0])
 
         self.beta = Beta(beta_concentration1, beta_concentration0)
         self.multinormal = MultivariateNormal(
@@ -78,6 +93,9 @@ class RBF():
         une classe qui contient les parametres d'une rbf
     """
     def __init__(self, params:torch.Tensor):
+        """
+        params: (...,7)
+        """
         assert params.shape[-1] == 7
         if params.ndim == 1:
             params = params.unsqueeze(0)
