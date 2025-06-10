@@ -13,15 +13,18 @@ import os
 import sys
 import argparse
 from tqdm import trange
+import datetime
 
 import numpy as np
 import torch
+import wandb
 
 from tutoutils import (plot_samples_and_histogram, save_code,
-                       CustomResNet152, stats)
-from distributions import RBF, grid, BetaNormal
+                       CustomResNet152, stats, make_wandb_run, test_print_traj)
+from distributions import RBF, grid, BetaNormal, ProductDistribution
 from nanophoto.meep_compute_fom import compute_FOM_parallele
 from nanophoto.get_trained_models import get_cpx_fields_unet_cnn_fompred
+import matplotlib.pyplot as plt
 
 from orion.client import report_objective
 from icecream import ic
@@ -36,24 +39,6 @@ sys.path.append(
 Le modele genere un seul design. Il y a un probleme avec les modeles PF et
 PB...
 """
-
-class ProductDistribution(torch.distributions.Distribution):
-    def __init__(self, dist1, dist2):
-        assert dist1.event_shape == dist2.event_shape
-        self.dist1 = dist1
-        self.dist2 = dist2
-        ic(dist1.batch_shape, dist2.batch_shape)
-        batch_shape = torch.concat((dist1.batch_shape,
-            dist2.batch_shape), dim=-1)
-        super().__init__(batch_shape=batch_shape, event_shape=dist1.event_shape)
-
-    def sample(self, sample_shape=torch.Size()):
-        sample_tensor = torch.concat((self.dist1.sample(sample_shape),
-            self.dist2.sample(sample.shape)))
-        return sample_tensor
-
-    def log_prob(self, value):
-        return self.dist1.log_prob(value) + self.dist2.log_prob(value)
 
 class PhotoEnv():
     def __init__(
@@ -103,7 +88,7 @@ def get_policy_dist(env, model, state, min_policy_std, max_policy_std):
     b0 = p[:, 2:4]**2
     nm = p[:, 4:9]
     ns = p[:, 9:]**2
-    bpd = torch.distributions.Beta(b1,b0)
+    bpd = torch.distributions.Beta(b1, b0)
     npd = torch.distributions.Normal(nm, ns)
     policy_dist = ProductDistribution(bpd, npd)
     # policy_dist = BetaNormal(b1, b0, nm, ncov)
@@ -111,25 +96,31 @@ def get_policy_dist(env, model, state, min_policy_std, max_policy_std):
 
 
 def action_parameters_to_state_space(action, state_shape=(101, 91)):
+    device = action.device
     xrange = (0, 1)
     yrange = (0, 1)
-    grid_pts = grid(state_shape, xrange, yrange)
-    action_image = RBF(action)(grid_pts)
+    grid_pts = grid(state_shape, xrange, yrange).to(device)
+    rbf_im = RBF(action)
+    action_image = rbf_im(grid_pts)
+    assert (action[:, 0] >= xrange[0]).all() and (action[:, 0] <=
+            xrange[1]).all()
+    assert (action[:, 1] >= yrange[0]).all() and (action[:, 1] <=
+            yrange[1]).all()
+
     return action_image
 
 
+# def step(x, action):
+#     """Takes a forward step in the environment."""
+#     action = action_parameters_to_state_space(action).to(x.device)
+#     new_x = x + action
+#     if (new_x > 1.).any() or (new_x < 0).any():
+#         print(new_x.min(), new_x.max())
+#         new_x = torch.clip(new_x, min=0, max=1)
+#         print(new_x.min(), new_x.max())
+#     return new_x
+
 def step(x, action):
-    """Takes a forward step in the environment."""
-    action = action_parameters_to_state_space(action).to(x.device)
-    new_x = x + action
-    if (new_x > 1.).any() or (new_x < 0).any():
-        print(new_x.min(), new_x.max())
-        new_x = torch.clip(new_x, min=0, max=1)
-        print(new_x.min(), new_x.max())
-    return new_x
-
-
-def step_with_sigmoid(x, action):
     new_x = torch.zeros_like(x)
     action = action_parameters_to_state_space(action).to(x.device)
     new_x = x + action
@@ -137,9 +128,9 @@ def step_with_sigmoid(x, action):
     return new_x
 
 
-def initalize_state(batch_size, device, env, randn=False):
+def initialize_state(batch_size, device, env, randn=False):
     """Trajectory starts at state = (X_0, t=0)."""
-    x = torch.zeros((batch_size,) + env.state_shape, device=device)
+    x = torch.ones((batch_size,) + env.state_shape, device=device) * 1/2
     x[:, 0] = env.init_value
     return x
 
@@ -171,9 +162,8 @@ def setup_experiment(lr_model=1e-3, lr_logz=1e-1, **kwargs):
 
 # @trace_gpu_memory
 
-
 def train(batch_size, trajectory_length, env, device, n_iterations,
-          savepath, **setup_configs):
+          savepath, run, **setup_configs):
     """Continuous GFlowNet training loop, with the Trajectory Balance objective."""
     # seed_all(seed)
     # Default hyperparameters used.
@@ -189,7 +179,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         # ic(torch.cuda.memory_allocated()/1e9)
         optimizer.zero_grad()
 
-        x = initalize_state(batch_size, device, env)
+        x = initialize_state(batch_size, device, env)
 
         # Trajectory stores all of the states in the forward loop.
         traj_shape = (batch_size, trajectory_length + 1, env.action_dim)
@@ -202,12 +192,15 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
             policy_dist = get_policy_dist(
                 env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
+            if (action[:, :2] < 0).any():
+                ic(action[:, :4])
             logPF += policy_dist.log_prob(action)
 
-            new_x = step_with_sigmoid(x, action)
+            new_x = step(x, action)
             trajectory[:, t + 1, :] = action
             x = new_x
 
+        test_print_traj(trajectory, savepath, str(it))
         del policy_dist, action, new_x
         torch.cuda.empty_cache()
 
@@ -215,7 +208,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         for t in range(trajectory_length, 0, -1):
             policy_dist = get_policy_dist(
                 env, backward_model, x, min_policy_std, max_policy_std)
-            action = trajectory[:, t, :] - trajectory[:, t - 1, :]
+            action = trajectory[:, t, :] # - trajectory[:, t - 1, :]
             logPB += policy_dist.log_prob(action)
 
         log_reward = env.log_reward(x)
@@ -223,7 +216,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
 
         # Compute Trajectory Balance Loss.
         loss = (logZ + logPF - logPB - log_reward).pow(2).mean()
-        print('backward mem use')
+        # print('backward mem use')
         # m0 = torch.cuda.memory_allocated()
         loss.backward()
         # m1 = torch.cuda.memory_allocated()
@@ -236,14 +229,20 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         optimizer.step()
         losses.append(loss.item())
 
-        if it % 100 == 0:
-            tbar.set_description("Training iter {}: (loss={:.3f}, logZ={:.3f}, log reward={:.3f}".format(
+        if it % 10 == 0:
+            if run is not None:
+                run.log({"loss": np.array(losses[-100:]).mean(), "logZ":
+                    logZ.item(), "avg log reward": avg_log_reward})
+
+            logstring = "Training iter {}: (loss={:.3f}, logZ={:.3f}, log reward={:.3f}".format(
                 it,
                 np.array(losses[-100:]).mean(),
                 logZ.item(),
                 avg_log_reward,
             )
-            )
+            print(logstring)
+            # tbar.set_description(
+            # )
             os.makedirs('checkpoints/', exist_ok=True)
             torch.save(forward_model.state_dict(),
                        os.path.join(savepath, 'forwardm.pth'))
@@ -256,7 +255,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         del x, logPF, logPB, log_reward
         torch.cuda.empty_cache()
 
-    ic(torch.cuda.max_memory_allocated()/1024**2)
+    # ic(torch.cuda.max_memory_allocated()/1024**2)
     return (forward_model, backward_model, logZ)
 
 
@@ -289,6 +288,13 @@ def inference(trajectory_length, forward_model, env, batch_size,
 
 
 def main(debug=True, **setup_configs):
+    if debug is False:
+        wandb_dir = "."
+        os.makedirs(wandb_dir, exist_ok=True)
+        date = current_time = datetime.datetime.now().strftime("%m-%d_%Hh%M")
+        run = make_wandb_run(setup_configs, wandb_dir, "gflow", date) 
+    else:
+        run = None
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float32
 
@@ -296,8 +302,7 @@ def main(debug=True, **setup_configs):
     min_policy_std = setup_configs['min_policy_std']
     max_policy_std = setup_configs['max_policy_std']
     batch_size = 8
-    action_dim = 6
-    n_iterations = 5000 if debug is False else 2
+    n_iterations = 5000 if debug is False else 11
 
     savedir = os.environ['SLURM_JOB_ID'] if debug is False else 'debug'
     savepath = os.path.join('outfiles', savedir)
@@ -308,7 +313,7 @@ def main(debug=True, **setup_configs):
     env = PhotoEnv()
     forward_model, backward_model, _ = train(
         batch_size, trajectory_length, env, device, n_iterations,
-        savepath, **setup_configs)
+        savepath, run, **setup_configs)
 
     inference_batch_size = 32
     samples = inference(trajectory_length, forward_model, env, inference_batch_size,

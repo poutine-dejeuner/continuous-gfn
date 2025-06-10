@@ -8,7 +8,7 @@
 #SBATCH --mail-user=vincentmillions@gmail.com
 #SBATCH --mail-type=END
 #SBATCH --mail-type=FAIL
-#SBATCH --comment="continuous gfn sigmoid dans step"
+#SBATCH --comment="continuous gfn"
 
 
 #module load python/3.8

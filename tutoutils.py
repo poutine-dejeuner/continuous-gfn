@@ -8,6 +8,9 @@ import torchvision.models as models
 import numpy as np
 import matplotlib.pyplot as plt
 from icecream import ic
+import wandb
+
+from distributions import RBF, grid
 
 class CustomResNet152(nn.Module):
     def __init__(self, input_channels=1, out_features=12):
@@ -15,6 +18,8 @@ class CustomResNet152(nn.Module):
         self.base = models.resnet152()
         self.base.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.base.fc = nn.Linear(self.base.fc.in_features, out_features)
+        torch.nn.init.zeros_(self.base.fc.bias)
+        torch.nn.init.normal_(self.base.fc.weight, mean=0.0, std=1e-8)
 
     def forward(self, x):
         return self.base(x)
@@ -44,6 +49,30 @@ def trace_gpu_memory(func):
             sys.settrace(None)
 
     return wrapper
+
+
+def test_print_traj(trajectory, savepath, title):
+    traj_shape = trajectory.shape
+    sh0 = traj_shape[0] * traj_shape[1]
+    sh2 = traj_shape[-1]
+    device = trajectory.device
+    xrange = (0, 1)
+    yrange = (0, 1)
+    trajectory = trajectory.reshape((sh0, 1, sh2))
+    grid_pts = grid((101,91), xrange, yrange).to(device)
+    images = RBF(trajectory)(grid_pts)
+    images = images.reshape(traj_shape[0:2] + (101,91))
+    images = images.detach().cpu().numpy()
+    
+    batch_size, traj_len = traj_shape[:2]
+    
+    _, axes = plt.subplots(nrows=batch_size, ncols=traj_len)
+    for i in range(batch_size):
+        for j in range(traj_len):
+            axes[i,j].imshow(images[i,j,:,:])
+            axes[i,j].axis('off')
+    plt.savefig(os.path.join(savepath, f"traj{title}.png"))
+
 
 def model_mem_use(model):
     """
@@ -260,6 +289,15 @@ def log_tensor_mem():
         except Exception:
             pass
     print(f"[Total Tensor GPU Mem] {total / 1024**2:.2f} MB\n")
+
+def make_wandb_run(config, data_path, group_name, run_name):
+     wandb_dir = os.path.expanduser(data_path + "wandb/")
+     if not os.path.isdir(wandb_dir):
+         os.mkdir(wandb_dir)
+     print(run_name)
+     run = wandb.init(project='nanophoto', config=config, entity="nanophoto",
+                      group=group_name, name=run_name, dir=wandb_dir)
+     return run
 
 
 if __name__ == "__main__":

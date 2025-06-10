@@ -1,9 +1,36 @@
+import os
 from typing import Optional
 import torch
 from torch.distributions import (Beta, MultivariateNormal, Normal,
         Distribution, Independent, constraints)
 import matplotlib.pyplot as plt
 from icecream import ic
+
+
+class ProductDistribution(torch.distributions.Distribution):
+    def __init__(self, dist1, dist2):
+        assert dist1.event_shape == dist2.event_shape
+        self.dist1 = dist1
+        self.dist2 = dist2
+        self.batch_shape1 = dist1.batch_shape
+        self.batch_shape2 = dist2.batch_shape
+        assert self.batch_shape1[0] == self.batch_shape2[0]
+        batch_shape = (self.batch_shape1[0],) + \
+            (self.batch_shape1[1] + self.batch_shape2[1],)
+        super().__init__(batch_shape=batch_shape,
+                         event_shape=dist1.event_shape, validate_args=False)
+
+    def sample(self, sample_shape=torch.Size()):
+        sample_tensor = torch.concat((self.dist1.sample(sample_shape),
+                                      self.dist2.sample(sample_shape)), dim=-1)
+        return sample_tensor
+
+    def log_prob(self, value):
+        value1 = value[:, :self.batch_shape1[1]]
+        value2 = value[:, self.batch_shape1[1]:]
+        logprob1 = self.dist1.log_prob(value1)
+        logprob2 = self.dist2.log_prob(value2)
+        return torch.concat((logprob1, logprob2), dim=-1)
 
 
 class BetaNormal(Distribution):
@@ -31,14 +58,10 @@ class BetaNormal(Distribution):
 
         self.normal_mean = normal_mean
         self.normal_cov_root = normal_cov_root
-        ic(normal_cov_root.shape)
         # ic(normal_cov_root)
-        ic(normal_cov_root[0])
-        input()
         # produit de matrices
         self.normal_cov = torch.einsum("...ij, ...jk->...ik", normal_cov_root,
                                             normal_cov_root.transpose(-2, -1))
-        ic(self.normal_cov[0])
 
         self.beta = Beta(beta_concentration1, beta_concentration0)
         self.multinormal = MultivariateNormal(
@@ -133,12 +156,14 @@ def grid(image_shape:tuple, xrange:tuple=None, yrange:tuple=None):
 
 def test__rbf():
     im_shape = (101, 91)
-    grid_pts = grid(im_shape, (-1, 1), (-1, 1))
+    grid_pts = grid(im_shape, (0, 1), (0, 1))
+    savepath = "outfiles/distributiontest"
+    os.makedirs(savepath, exist_ok=True)
 
     if True:
         print("test single gaussian")
         dist = BetaNormal(
-                torch.randn((2,))**2,
+                torch.randn((2,))**2, # centres
                 torch.randn((2,))**2,
                 torch.randn((5,)),
                 torch.randn((5,5)),
@@ -149,7 +174,7 @@ def test__rbf():
         assert im.shape == im_shape, f"{im.shape}"
         plt.imshow(im.numpy())
         plt.axis('off')
-        plt.savefig('rbftest1.png')
+        plt.savefig(os.path.join(savepath, 'rbftest1.png'))
     if True:
         print("test several gaussian")
         n_fun = 4
@@ -165,7 +190,7 @@ def test__rbf():
         assert im.shape == im_shape, f"{im.shape}"
         plt.imshow(im.numpy())
         plt.axis('off')
-        plt.savefig('rbftest2.png')
+        plt.savefig(os.path.join(savepath, 'rbftest2.png'))
     if True:
         from math import sqrt
         print("test several images several gaussians")
@@ -189,8 +214,7 @@ def test__rbf():
         for i in range(n_im):
             axes[i].imshow(im[...,i].numpy())
             axes[i].axis('off')
-        plt.savefig('rbftest3.png')
-
+        plt.savefig(os.path.join(savepath, 'rbftest3.png'))
 
 
 if __name__ == "__main__":
