@@ -37,11 +37,13 @@ def test__model_sampling():
 
         action = action.unsqueeze(1)
         image = RBF(traj)(grid((101, 91), (0, 1), (0, 1)).cuda())
-        plt.imshow(image[:,:,0].cpu().numpy())
+        ic(image.shape)
+        plt.imshow(image[0,:,:].cpu().numpy())
         plt.title(action[0].cpu().numpy())
         plt.savefig(os.path.join(savepath, f"action{i}.png"))
 
     os.makedirs(savepath, exist_ok=True)
+    # traj = torch.tensor(traj, names=("batch", "traj", "action"))
     test_print_traj(traj, savepath, "test")    
     # test if all dim 0 slices of action are equal
     for i in range(1, batch_size):

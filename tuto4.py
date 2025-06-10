@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import wandb
 
-from tutoutils import (plot_samples_and_histogram, save_code,
+from tutoutils import (plot_samples_and_histogram, save_code, stats,
                        CustomResNet152, stats, make_wandb_run, test_print_traj)
 from distributions import RBF, grid, BetaNormal, ProductDistribution
 from nanophoto.meep_compute_fom import compute_FOM_parallele
@@ -88,6 +88,8 @@ def get_policy_dist(env, model, state, min_policy_std, max_policy_std):
     b0 = p[:, 2:4]**2
     nm = p[:, 4:9]
     ns = p[:, 9:]**2
+    stats(b1)
+    stats(b0)
     bpd = torch.distributions.Beta(b1, b0)
     npd = torch.distributions.Normal(nm, ns)
     policy_dist = ProductDistribution(bpd, npd)
@@ -99,13 +101,15 @@ def action_parameters_to_state_space(action, state_shape=(101, 91)):
     device = action.device
     xrange = (0, 1)
     yrange = (0, 1)
+    assert (action[:, 0] >= xrange[0]).all(), f"{action[:,0].min()}"
+    assert (action[:, 0] <= xrange[1]).all(), f"{action[:,0].max()}"
+    assert (action[:, 1] >= yrange[0]).all(), f"{action[:,1].min()}"
+    assert (action[:, 1] <= yrange[1]).all(), f"{action[:,1].max()}"
+
     grid_pts = grid(state_shape, xrange, yrange).to(device)
+    action = action.unsqueeze(1)
     rbf_im = RBF(action)
     action_image = rbf_im(grid_pts)
-    assert (action[:, 0] >= xrange[0]).all() and (action[:, 0] <=
-            xrange[1]).all()
-    assert (action[:, 1] >= yrange[0]).all() and (action[:, 1] <=
-            yrange[1]).all()
 
     return action_image
 
@@ -192,6 +196,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
             policy_dist = get_policy_dist(
                 env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
+
             if (action[:, :2] < 0).any():
                 ic(action[:, :4])
             logPF += policy_dist.log_prob(action)
@@ -334,7 +339,7 @@ def main(debug=True, **setup_configs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', action='store_true', default=False)
-    parser.add_argument('-lr_model', type=float, default=1e-3)
+    parser.add_argument('-lr_model', type=float, default=1e-2)
     parser.add_argument('-lr_logz', type=float, default=1e-1)
     parser.add_argument('-min_policy_std', type=float, default=0.1)
     parser.add_argument('-max_policy_std', type=float, default=1.)

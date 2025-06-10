@@ -52,6 +52,7 @@ def trace_gpu_memory(func):
 
 
 def test_print_traj(trajectory, savepath, title):
+    # trajectory.align_to("batch", "traj", "action")
     traj_shape = trajectory.shape
     sh0 = traj_shape[0] * traj_shape[1]
     sh2 = traj_shape[-1]

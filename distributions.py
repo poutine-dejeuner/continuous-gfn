@@ -116,10 +116,12 @@ class RBF():
         une classe qui contient les parametres d'une rbf
     """
     def __init__(self, params:torch.Tensor):
-        """
-        params: (...,7)
+        r"""
+        Args:
+            params (Tensor): shape (batch_size, num_fun, 7)
         """
         assert params.shape[-1] == 7
+        assert params.ndim == 3, f"params.ndim {params.ndim}"
         if params.ndim == 1:
             params = params.unsqueeze(0)
         self.device = params.device
@@ -138,6 +140,7 @@ class RBF():
         z = torch.exp(-0.5 * z)
         z = z * self.amplitudes
         z = z.sum(-1)
+        z = z.permute(2, 0, 1)
         return z
 
 def broadcast_add(A, B):
@@ -169,10 +172,11 @@ def test__rbf():
                 torch.randn((5,5)),
                 )
         p = dist.sample()
+        p = p.unsqueeze(0).unsqueeze(0)
         rbf = RBF(p)
         im = rbf(grid_pts)
-        assert im.shape == im_shape, f"{im.shape}"
-        plt.imshow(im.numpy())
+        assert im.shape == (1,) + im_shape, f"{im.shape}"
+        plt.imshow(im.numpy().squeeze())
         plt.axis('off')
         plt.savefig(os.path.join(savepath, 'rbftest1.png'))
     if True:
@@ -185,10 +189,11 @@ def test__rbf():
                 torch.randn((n_fun, 5,5)),
                 )
         p = dist.sample()
+        p = p.unsqueeze(0)
         rbf = RBF(p)
         im = rbf(grid_pts)
-        assert im.shape == im_shape, f"{im.shape}"
-        plt.imshow(im.numpy())
+        assert im.shape == (1,) + im_shape, f"{im.shape}"
+        plt.imshow(im.numpy().squeeze())
         plt.axis('off')
         plt.savefig(os.path.join(savepath, 'rbftest2.png'))
     if True:
@@ -205,14 +210,14 @@ def test__rbf():
         p = dist.sample()
         rbf = RBF(p)
         im = rbf(grid_pts)
-        assert im.shape[:2] == im_shape, f"{im.shape}"
-        assert im.shape[-1] == n_im, f"{im.shape}"
+        assert im.shape[1:] == im_shape, f"{im.shape}"
+        assert im.shape[0] == n_im, f"{im.shape}"
 
         n = int(sqrt(n_im))
         _, axes = plt.subplots(n, n)
         axes = axes.flatten()
         for i in range(n_im):
-            axes[i].imshow(im[...,i].numpy())
+            axes[i].imshow(im[i].numpy())
             axes[i].axis('off')
         plt.savefig(os.path.join(savepath, 'rbftest3.png'))
 
