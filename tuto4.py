@@ -40,6 +40,13 @@ Le modele genere un seul design. Il y a un probleme avec les modeles PF et
 PB...
 """
 
+def get_model_grad_norm(model):
+    norm = 0.
+    for p in model.parameters():
+        norm += torch.linalg.vector_norm(p)**2
+    return torch.sqrt(norm).item()
+
+
 class PhotoEnv():
     def __init__(
         self,
@@ -84,12 +91,12 @@ def get_policy_dist(env, model, state, min_policy_std, max_policy_std):
     state = state.unsqueeze(1)
     state = state.contiguous()
     p = model(state)  # Shape = [batch_shape, env.action_dim]
-    b1 = p[:, :2]**2
-    b0 = p[:, 2:4]**2
+    b1 = torch.abs(p[:, :2])
+    b0 = torch.abs(p[:, 2:4])
     nm = p[:, 4:9]
-    ns = p[:, 9:]**2
-    stats(b1)
-    stats(b0)
+    ns = torch.abs(p[:, 9:])
+    if (b1.max() == torch.nan) or (b0.max() == torch.nan):
+        raise Exception("nan")
     bpd = torch.distributions.Beta(b1, b0)
     npd = torch.distributions.Normal(nm, ns)
     policy_dist = ProductDistribution(bpd, npd)
@@ -113,16 +120,6 @@ def action_parameters_to_state_space(action, state_shape=(101, 91)):
 
     return action_image
 
-
-# def step(x, action):
-#     """Takes a forward step in the environment."""
-#     action = action_parameters_to_state_space(action).to(x.device)
-#     new_x = x + action
-#     if (new_x > 1.).any() or (new_x < 0).any():
-#         print(new_x.min(), new_x.max())
-#         new_x = torch.clip(new_x, min=0, max=1)
-#         print(new_x.min(), new_x.max())
-#     return new_x
 
 def step(x, action):
     new_x = torch.zeros_like(x)
@@ -180,6 +177,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
     avg_log_reward = 0
 
     for it in tbar:
+        # ic(it)
         # ic(torch.cuda.memory_allocated()/1e9)
         optimizer.zero_grad()
 
@@ -192,12 +190,14 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         logPB = torch.zeros((batch_size, env.action_dim), device=device)
 
         # Forward loop to generate full trajectory and compute logPF.
+        print("forward model loop")
         for t in range(trajectory_length):
             policy_dist = get_policy_dist(
                 env, forward_model, x, min_policy_std, max_policy_std)
             action = policy_dist.sample()
 
             if (action[:, :2] < 0).any():
+                raise ValueError
                 ic(action[:, :4])
             logPF += policy_dist.log_prob(action)
 
@@ -210,6 +210,7 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         torch.cuda.empty_cache()
 
         # Backward loop to compute logPB from existing trajectory under the backward policy.
+        print("backward model loop")
         for t in range(trajectory_length, 0, -1):
             policy_dist = get_policy_dist(
                 env, backward_model, x, min_policy_std, max_policy_std)
@@ -220,13 +221,17 @@ def train(batch_size, trajectory_length, env, device, n_iterations,
         avg_log_reward = log_reward.mean().item()
 
         # Compute Trajectory Balance Loss.
+        # ic(logZ.mean().item(), logPF.mean().item(), 
+        #         logPB.mean().item(), log_reward.mean().item())
         loss = (logZ + logPF - logPB - log_reward).pow(2).mean()
         # print('backward mem use')
         # m0 = torch.cuda.memory_allocated()
         loss.backward()
-        # m1 = torch.cuda.memory_allocated()
-        # ic((m1-m0)/1024**2)
-        # ic(m1/1024**2)
+        max_norm = 0.5
+        torch.nn.utils.clip_grad_norm_(backward_model.parameters(),
+                max_norm=max_norm)
+        torch.nn.utils.clip_grad_norm_(forward_model.parameters(),
+                max_norm=max_norm)
 
         # ic(get_model_grad_norm(forward_model))
         # ic(get_model_grad_norm(backward_model))
@@ -273,7 +278,7 @@ def inference(trajectory_length, forward_model, env, batch_size,
         #     (batch_size, trajectory_length + 1, ), device=device)
         # trajectory[:, 0, 0] = env.init_value
 
-        x = initalize_state(batch_size, device, env)
+        x = initialize_state(batch_size, device, env)
 
         for t in range(trajectory_len):
             policy_dist = get_policy_dist(
@@ -339,7 +344,7 @@ def main(debug=True, **setup_configs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', action='store_true', default=False)
-    parser.add_argument('-lr_model', type=float, default=1e-2)
+    parser.add_argument('-lr_model', type=float, default=1e-4)
     parser.add_argument('-lr_logz', type=float, default=1e-1)
     parser.add_argument('-min_policy_std', type=float, default=0.1)
     parser.add_argument('-max_policy_std', type=float, default=1.)
